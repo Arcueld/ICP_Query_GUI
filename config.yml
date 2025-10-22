@@ -1,0 +1,58 @@
+captcha:
+  captcha_retry_times: 5
+  device:
+  - CUDA
+  enable: true
+  proxy_retry_delay: 1
+  save_failed_img: false
+  save_failed_img_path: failed_captcha
+log:
+  backup_count: 7
+  dir: logs
+  file_head: ymicp
+  output_console: true
+  save_log: false
+proxy:
+  extra_api:
+    auto_maintenace: true
+    check_proxy: true
+    check_proxy_num: 20
+    enable: false
+    extra_interval: 3
+    pool_num: 100
+    proxy_timeout: 0.5
+    timeout: 100
+    timeout_drop: 8
+    url: null
+  static_proxy:
+    enable: false
+    host: 127.0.0.1
+    password: ''
+    port: 8800
+    type: http
+    username: ''
+query:
+  captcha_retry_times: 5
+  coding_code: auto
+  coding_show: false
+  default_page_size: 20
+  max_page_size: 100
+  proxy_retry_delay: 1
+  retry_times: 2
+risk_avoidance:
+  allow_type:
+  - web
+  - app
+  - mapp
+  - kapp
+  - bweb
+  - bapp
+  - bmapp
+  - bkapp
+  prohibit_suffix: []
+system:
+  detail_concurrency: 5
+  host: 0.0.0.0
+  http_client_timeout: 5
+  port: 16181
+  web_ui: true
