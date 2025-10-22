@@ -262,11 +262,12 @@ class YOLO_ONNX:
 def get_resource_path(relative_path):
     """获取打包后的可执行文件中的资源文件路径"""
     if getattr(sys, 'frozen', False):  # 如果是打包后的程序
-        app_path = os.path.dirname(sys.executable)
+        # PyInstaller打包后的资源文件路径
+        base_path = sys._MEIPASS
     else:
-        app_path = os.path.dirname(os.path.abspath(__file__))
+        base_path = os.path.dirname(os.path.abspath(__file__))
 
-    return os.path.join(app_path, relative_path)
+    return os.path.join(base_path, relative_path)
 
 
 class detnate:
