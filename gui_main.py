@@ -10,11 +10,10 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QGridLayout, QLabel, QLineEdit, 
                              QPushButton, QTextEdit, QTabWidget, QGroupBox,
                              QComboBox, QCheckBox, QSpinBox, QMessageBox,
-                             QProgressBar, QSplitter, QTableWidget, QTableWidgetItem,
+                             QProgressBar, QTableWidget, QTableWidgetItem,
                              QHeaderView, QStatusBar,
-                             QFileDialog, QDialog, QMenu)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl
-from PyQt5.QtGui import QDesktopServices
+                             QFileDialog, QDialog)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from load_config import config
 
 class QueryWorker(QThread):
@@ -304,8 +303,11 @@ class ConfigDialog(QDialog):
             with open(config_file, 'w', encoding='utf-8') as f:
                 yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True, indent=2)
             
-            # 重新加载配置
-            self.reload_config()
+            # 重新加载配置（在MainWindow的on_config_saved中处理）
+            import importlib
+            import load_config
+            importlib.reload(load_config)
+            importlib.reload(ymicp)
             
             # 发送配置保存信号
             self.config_saved.emit()
@@ -375,7 +377,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("ICP备案查询工具 v1.0")
         self.setGeometry(100, 100, 1000, 700)
-        self.query_history_cache = []
         self.init_ui()
         self.init_status_bar()
         self.init_style()
@@ -423,33 +424,7 @@ class MainWindow(QMainWindow):
         query_group.setLayout(query_layout)
         main_layout.addWidget(query_group)
         
-        # 创建分割器
-        splitter = QSplitter(Qt.Horizontal)
-        
-        # 左侧：查询历史
-        history_widget = QWidget()
-        history_layout = QVBoxLayout()
-        
-        history_group = QGroupBox("查询历史")
-        history_layout.addWidget(history_group)
-        
-        self.history_list = QTableWidget()
-        self.history_list.setColumnCount(4)
-        self.history_list.setHorizontalHeaderLabels(["时间", "类型", "内容", "状态"])
-        self.history_list.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-
-        self.history_list.setSelectionBehavior(QTableWidget.SelectRows)
-        self.history_list.setSelectionMode(QTableWidget.SingleSelection)
-
-        self.history_list.itemDoubleClicked.connect(self.on_history_double_clicked)
-
-        self.history_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.history_list.customContextMenuRequested.connect(self.show_history_context_menu)
-        history_layout.addWidget(self.history_list)
-        
-        history_widget.setLayout(history_layout)
-        splitter.addWidget(history_widget)
-        
+        # 结果显示区域
         result_widget = QWidget()
         result_layout = QVBoxLayout()
         
@@ -459,8 +434,7 @@ class MainWindow(QMainWindow):
         structured_layout = QVBoxLayout()
         
         self.result_table = QTableWidget()
-        self.result_table.setColumnCount(4)
-        self.result_table.setHorizontalHeaderLabels(["字段", "值", "类型", "说明"])
+        self.result_table.setColumnCount(0)  # 初始不设置列，根据查询结果动态设置
         self.result_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         structured_layout.addWidget(self.result_table)
         
@@ -481,10 +455,7 @@ class MainWindow(QMainWindow):
         result_widget.setLayout(result_layout)
         result_layout.addWidget(result_tabs)
         
-        splitter.addWidget(result_widget)
-        splitter.setSizes([300, 700])
-        
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(result_widget)
         
         # 工具栏
         toolbar_layout = QHBoxLayout()
@@ -557,9 +528,6 @@ class MainWindow(QMainWindow):
     
     def _start_single_query(self, query_type, query_text):
         """单个查询"""
-        # 添加到历史记录
-        self.add_to_history(query_type, query_text, "查询中...")
-        
         # 禁用查询按钮
         self.query_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
@@ -574,10 +542,6 @@ class MainWindow(QMainWindow):
     
     def _start_batch_query(self, query_type, query_targets):
         """批量查询"""
-        # 添加到历史记录
-        batch_text = f"批量查询({len(query_targets)}个目标)"
-        self.add_to_history(query_type, batch_text, "批量查询中...")
-        
         # 禁用查询按钮
         self.query_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
@@ -591,146 +555,10 @@ class MainWindow(QMainWindow):
         self.batch_worker.error_occurred.connect(self.on_batch_query_error)
         self.batch_worker.start()
         
-    def add_to_history(self, query_type, query_text, status, result=None):
-        """添加到查询历史"""
-        current_time = datetime.now().strftime("%H:%M:%S")
-        row = self.history_list.rowCount()
-        self.history_list.insertRow(row)
-        
-        self.history_list.setItem(row, 0, QTableWidgetItem(current_time))
-        self.history_list.setItem(row, 1, QTableWidgetItem(query_type))
-        self.history_list.setItem(row, 2, QTableWidgetItem(query_text))
-        self.history_list.setItem(row, 3, QTableWidgetItem(status))
-        
-        # 保存到缓存
-        history_item = {
-            'time': current_time,
-            'type': query_type,
-            'content': query_text,
-            'status': status,
-            'result': result
-        }
-        self.query_history_cache.append(history_item)
-        
-    def on_history_double_clicked(self, item):
-        """双击历史记录时从缓存中获取结果"""
-        row = item.row()
-        
-        # 检查缓存中是否有对应的结果
-        if row < len(self.query_history_cache):
-            history_item = self.query_history_cache[row]
-            
-            # 检查是否有结果数据
-            if history_item.get('result') and history_item.get('status') == '成功':
-                # 从缓存中获取结果
-                result = history_item['result']
-                
-                # 显示原始结果
-                self.raw_result.setPlainText(json.dumps(result, ensure_ascii=False, indent=2))
-                
-                # 解析并显示结构化结果
-                self.display_structured_result(result)
-                
-                # 更新状态栏
-                self.status_bar.showMessage("已从历史记录中加载结果")
-                self.connection_status.setText("连接状态: 正常")
-                
-                return
-        
-        # 如果没有缓存结果，则重新查询
-        query_type = self.history_list.item(row, 1).text()
-        query_text = self.history_list.item(row, 2).text()
-        
-        # 设置查询类型和内容
-        self.query_type.setCurrentText(query_type)
-        self.query_input.setText(query_text)
-        
-        # 自动开始查询
-        self.start_query()
-        
-    def show_history_context_menu(self, position):
-        """显示历史记录右键菜单"""
-        if self.history_list.itemAt(position) is None:
-            return
-            
-        # 创建右键菜单
-        context_menu = QMenu(self)
-        
-        # 重新查询
-        re_query_action = context_menu.addAction("重新查询")
-        re_query_action.triggered.connect(self.re_query_selected)
-        
-        # 复制查询内容
-        copy_action = context_menu.addAction("复制查询内容")
-        copy_action.triggered.connect(self.copy_query_text)
-        
-        # 删除记录
-        context_menu.addSeparator()
-        delete_action = context_menu.addAction("删除记录")
-        delete_action.triggered.connect(self.delete_selected_history)
-        
-        # 显示菜单
-        context_menu.exec_(self.history_list.mapToGlobal(position))
-        
-    def re_query_selected(self):
-        """重新查询选中的记录"""
-        current_row = self.history_list.currentRow()
-        if current_row >= 0:
-            # 先尝试从缓存加载
-            if current_row < len(self.query_history_cache):
-                history_item = self.query_history_cache[current_row]
-                if history_item.get('result') and history_item.get('status') == '成功':
-                    # 从缓存加载结果
-                    result = history_item['result']
-                    self.raw_result.setPlainText(json.dumps(result, ensure_ascii=False, indent=2))
-                    self.display_structured_result(result)
-                    self.status_bar.showMessage("已从历史记录中加载结果")
-                    return
-            
-            # 如果没有缓存结果，则重新查询
-            query_type = self.history_list.item(current_row, 1).text()
-            query_text = self.history_list.item(current_row, 2).text()
-            
-            self.query_type.setCurrentText(query_type)
-            self.query_input.setText(query_text)
-            self.start_query()
-            
-    def copy_query_text(self):
-        """复制查询内容到剪贴板"""
-        current_row = self.history_list.currentRow()
-        if current_row >= 0:
-            query_text = self.history_list.item(current_row, 2).text()
-            clipboard = QApplication.clipboard()
-            clipboard.setText(query_text)
-            self.status_bar.showMessage("查询内容已复制到剪贴板")
-            
-    def delete_selected_history(self):
-        """删除选中的历史记录"""
-        current_row = self.history_list.currentRow()
-        if current_row >= 0:
-            reply = QMessageBox.question(self, "确认删除", "确定要删除这条历史记录吗？",
-                                       QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                self.history_list.removeRow(current_row)
-                # 同时删除缓存中的记录
-                if current_row < len(self.query_history_cache):
-                    del self.query_history_cache[current_row]
-                self.status_bar.showMessage("历史记录已删除")
-        
     def on_query_result(self, result):
         """处理查询结果"""
         self.progress_bar.setVisible(False)
         self.query_btn.setEnabled(True)
-        
-        # 更新历史记录状态和结果
-        if self.history_list.rowCount() > 0:
-            last_row = self.history_list.rowCount() - 1
-            self.history_list.setItem(last_row, 3, QTableWidgetItem("成功"))
-            
-            # 更新缓存中的结果
-            if len(self.query_history_cache) > 0:
-                self.query_history_cache[-1]['status'] = "成功"
-                self.query_history_cache[-1]['result'] = result
         
         # 显示原始结果
         self.raw_result.setPlainText(json.dumps(result, ensure_ascii=False, indent=2))
@@ -750,11 +578,6 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.query_btn.setEnabled(True)
         
-        # 更新历史记录状态
-        if self.history_list.rowCount() > 0:
-            last_row = self.history_list.rowCount() - 1
-            self.history_list.setItem(last_row, 3, QTableWidgetItem("失败"))
-        
         self.status_bar.showMessage("查询失败")
         self.connection_status.setText("连接状态: 异常")
         
@@ -764,16 +587,6 @@ class MainWindow(QMainWindow):
         """处理批量查询结果"""
         self.progress_bar.setVisible(False)
         self.query_btn.setEnabled(True)
-        
-        # 更新历史记录状态和结果
-        if self.history_list.rowCount() > 0:
-            last_row = self.history_list.rowCount() - 1
-            self.history_list.setItem(last_row, 3, QTableWidgetItem("成功"))
-            
-            # 更新缓存中的结果
-            if len(self.query_history_cache) > 0:
-                self.query_history_cache[-1]['status'] = "成功"
-                self.query_history_cache[-1]['result'] = result
         
         # 显示原始结果
         self.raw_result.setPlainText(json.dumps(result, ensure_ascii=False, indent=2))
@@ -793,11 +606,6 @@ class MainWindow(QMainWindow):
         """处理批量查询错误"""
         self.progress_bar.setVisible(False)
         self.query_btn.setEnabled(True)
-        
-        # 更新历史记录状态
-        if self.history_list.rowCount() > 0:
-            last_row = self.history_list.rowCount() - 1
-            self.history_list.setItem(last_row, 3, QTableWidgetItem("失败"))
         
         self.status_bar.showMessage("批量查询失败")
         self.connection_status.setText("连接状态: 异常")
@@ -930,10 +738,6 @@ class MainWindow(QMainWindow):
         ws_results = wb.create_sheet("查询结果")
         self._write_results_to_sheet(ws_results)
         
-        # 创建查询历史工作表
-        ws_history = wb.create_sheet("查询历史")
-        self._write_history_to_sheet(ws_history)
-        
         # 保存文件
         wb.save(file_path)
     
@@ -972,40 +776,10 @@ class MainWindow(QMainWindow):
                     max_length = max(max_length, len(str(cell_value)))
             ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
     
-    def _write_history_to_sheet(self, ws):
-        """写入查询历史到工作表"""
-        # 设置表头
-        headers = ["时间", "类型", "内容", "状态"]
-        for col, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col, value=header)
-            cell.font = Font(bold=True)
-            cell.fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-        
-        # 写入历史数据
-        for row in range(self.history_list.rowCount()):
-            for col in range(self.history_list.columnCount()):
-                item = self.history_list.item(row, col)
-                if item:
-                    ws.cell(row=row+2, column=col+1, value=item.text())
-        
-        # 自动调整列宽
-        for col in range(1, len(headers) + 1):
-            column_letter = get_column_letter(col)
-            max_length = 0
-            for row in range(1, ws.max_row + 1):
-                cell_value = ws[f"{column_letter}{row}"].value
-                if cell_value:
-                    max_length = max(max_length, len(str(cell_value)))
-            ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
-        
     def clear_results(self):
         """清空结果"""
         self.result_table.setRowCount(0)
         self.raw_result.clear()
-        self.history_list.setRowCount(0)
-        # 清空缓存
-        self.query_history_cache.clear()
         self.status_bar.showMessage("结果已清空")
         
     def show_about(self):
