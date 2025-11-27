@@ -15,6 +15,30 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QFileDialog, QDialog)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from load_config import config
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.utils import get_column_letter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+QUERY_METHODS = {
+    "APP": "ymApp",
+    "网站": "ymWeb",
+    "小程序": "ymMiniApp",
+    "快应用": "ymKuaiApp",
+    "黑名单APP": "bymApp",
+    "黑名单网站": "bymWeb",
+    "黑名单小程序": "bymMiniApp",
+    "黑名单快应用": "bymKuaiApp",
+}
+
+
+def execute_query(icp_instance, query_type, target):
+    """根据查询类型执行对应的异步查询方法"""
+    method_name = QUERY_METHODS.get(query_type)
+    if method_name and hasattr(icp_instance, method_name):
+        coro = getattr(icp_instance, method_name)(target)
+        return icp_instance.run_async(coro)
+    return {"code": 400, "message": "不支持的查询类型"}
 
 class QueryWorker(QThread):
     result_ready = pyqtSignal(dict)
@@ -31,24 +55,7 @@ class QueryWorker(QThread):
         try:
             self.icp = ymicp.beian()
             
-            if self.query_type == "APP":
-                result = asyncio.run(self.icp.ymApp(self.query_text))
-            elif self.query_type == "网站":
-                result = asyncio.run(self.icp.ymWeb(self.query_text))
-            elif self.query_type == "小程序":
-                result = asyncio.run(self.icp.ymMiniApp(self.query_text))
-            elif self.query_type == "快应用":
-                result = asyncio.run(self.icp.ymKuaiApp(self.query_text))
-            elif self.query_type == "黑名单APP":
-                result = asyncio.run(self.icp.bymApp(self.query_text))
-            elif self.query_type == "黑名单网站":
-                result = asyncio.run(self.icp.bymWeb(self.query_text))
-            elif self.query_type == "黑名单小程序":
-                result = asyncio.run(self.icp.bymMiniApp(self.query_text))
-            elif self.query_type == "黑名单快应用":
-                result = asyncio.run(self.icp.bymKuaiApp(self.query_text))
-            else:
-                result = {"code": 400, "message": "不支持的查询类型"}
+            result = execute_query(self.icp, self.query_type, self.query_text)
             
             self.result_ready.emit(result)
             
@@ -56,7 +63,7 @@ class QueryWorker(QThread):
             self.error_occurred.emit(f"查询失败: {str(e)}")
         finally:
             if self.icp:
-                asyncio.run(self.icp.cleanup())
+                self.icp.cleanup()
 
 class BatchQueryWorker(QThread):
     result_ready = pyqtSignal(dict)
@@ -69,67 +76,65 @@ class BatchQueryWorker(QThread):
         self.query_targets = query_targets
         self.icp = None
         self.batch_results = []
+        system_cfg = getattr(config, 'system', object())
+        max_workers = getattr(system_cfg, 'batch_thread_workers', 4)
+        self.max_workers = max(1, min(16, int(max_workers))) if isinstance(max_workers, (int, float)) else 4
         
     def run(self):
+        total_targets = len(self.query_targets)
+        if total_targets == 0:
+            self.batch_results = []
+            self.result_ready.emit(self._generate_summary_result(0, 0))
+            return
+        
+        successful_queries = 0
+        failed_queries = 0
+        completed = 0
+        results_buffer = [None] * total_targets
+        
         try:
-            self.icp = ymicp.beian()
-            
-            total_targets = len(self.query_targets)
-            successful_queries = 0
-            failed_queries = 0
-            
-            for i, target in enumerate(self.query_targets):
-                try:
-                    if self.query_type == "APP":
-                        result = asyncio.run(self.icp.ymApp(target))
-                    elif self.query_type == "网站":
-                        result = asyncio.run(self.icp.ymWeb(target))
-                    elif self.query_type == "小程序":
-                        result = asyncio.run(self.icp.ymMiniApp(target))
-                    elif self.query_type == "快应用":
-                        result = asyncio.run(self.icp.ymKuaiApp(target))
-                    elif self.query_type == "黑名单APP":
-                        result = asyncio.run(self.icp.bymApp(target))
-                    elif self.query_type == "黑名单网站":
-                        result = asyncio.run(self.icp.bymWeb(target))
-                    elif self.query_type == "黑名单小程序":
-                        result = asyncio.run(self.icp.bymMiniApp(target))
-                    elif self.query_type == "黑名单快应用":
-                        result = asyncio.run(self.icp.bymKuaiApp(target))
-                    else:
-                        result = {"code": 400, "message": "不支持的查询类型"}
-                    
-                    query_result = {
-                        "target": target,
-                        "result": result,
-                        "success": result.get("code") == 200,
-                        "index": i
-                    }
-                    self.batch_results.append(query_result)
-                    
-                    if result.get("code") == 200:
-                        successful_queries += 1
-                    else:
+            worker_count = min(self.max_workers, total_targets)
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {
+                    executor.submit(self._execute_single_target, idx, target): idx
+                    for idx, target in enumerate(self.query_targets)
+                }
+                
+                for future in as_completed(future_map):
+                    idx = future_map[future]
+                    target = self.query_targets[idx]
+                    try:
+                        query_result = future.result()
+                        results_buffer[idx] = query_result
+                        if query_result["success"]:
+                            successful_queries += 1
+                        else:
+                            failed_queries += 1
+                        status_msg = "完成"
+                    except Exception as e:
+                        query_result = {
+                            "target": target,
+                            "result": {"code": 500, "message": f"查询失败: {str(e)}"},
+                            "success": False,
+                            "index": idx
+                        }
+                        results_buffer[idx] = query_result
                         failed_queries += 1
-                        
-                except Exception as e:
-                    query_result = {
-                        "target": target,
-                        "result": {"code": 500, "message": f"查询失败: {str(e)}"},
-                        "success": False,
-                        "index": i
-                    }
-                    self.batch_results.append(query_result)
-                    failed_queries += 1
+                        status_msg = f"异常: {str(e)}"
+                    
+                    completed += 1
+                    self.progress_update.emit(
+                        f"{status_msg} {target} ({completed}/{total_targets})",
+                        completed,
+                        total_targets
+                    )
             
+            self.batch_results = [result for result in results_buffer if result]
             summary_result = self._generate_summary_result(successful_queries, failed_queries)
             self.result_ready.emit(summary_result)
-            
+        
         except Exception as e:
             self.error_occurred.emit(f"批量查询失败: {str(e)}")
-        finally:
-            if self.icp:
-                asyncio.run(self.icp.cleanup())
     
     def _generate_summary_result(self, successful_queries, failed_queries):
         all_data = []
@@ -154,6 +159,21 @@ class BatchQueryWorker(QThread):
             }
         }
         return summary
+
+    def _execute_single_target(self, index, target):
+        """在独立线程中执行单个查询"""
+        icp_instance = ymicp.beian()
+        try:
+            result = execute_query(icp_instance, self.query_type, target)
+            success = result.get("code") == 200
+            return {
+                "target": target,
+                "result": result,
+                "success": success,
+                "index": index
+            }
+        finally:
+            icp_instance.cleanup()
 
 class ConfigDialog(QDialog):
     config_saved = pyqtSignal()
@@ -303,12 +323,6 @@ class ConfigDialog(QDialog):
             with open(config_file, 'w', encoding='utf-8') as f:
                 yaml.dump(config_data, f, default_flow_style=False, allow_unicode=True, indent=2)
             
-            # 重新加载配置（在MainWindow的on_config_saved中处理）
-            import importlib
-            import load_config
-            importlib.reload(load_config)
-            importlib.reload(ymicp)
-            
             # 发送配置保存信号
             self.config_saved.emit()
             
@@ -349,25 +363,21 @@ class AboutDialog(QDialog):
         
         # 标题
         title_label = QLabel("ICP_Query_GUI v1.0")
-        title_label.setStyleSheet("font-size: 16px; font-weight: bold; margin: 10px;")
         title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(title_label)
         
         original_label = QLabel('<a href="https://github.com/HG-ha">原作者: HG-ha</a>')
         original_label.setOpenExternalLinks(True)
-        original_label.setStyleSheet("margin: 5px; color: #0066cc;")
         original_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(original_label)
         
         fork_label = QLabel('<a href="https://github.com/Arcueld">二开: Arcueld</a>')
         fork_label.setOpenExternalLinks(True)
-        fork_label.setStyleSheet("margin: 5px; color: #0066cc;")
         fork_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(fork_label)
         
         close_btn = QPushButton("关闭")
         close_btn.clicked.connect(self.accept)
-        close_btn.setStyleSheet("margin: 10px; padding: 5px 20px;")
         layout.addWidget(close_btn)
         
         self.setLayout(layout)
@@ -410,7 +420,6 @@ class MainWindow(QMainWindow):
         query_layout.addWidget(self.page_size_label, 1, 2)
         
         batch_hint = QLabel("支持批量查询：每行一个目标")
-        batch_hint.setStyleSheet("color: #666; font-size: 12px;")
         query_layout.addWidget(batch_hint, 1, 3)
         
         self.query_btn = QPushButton("开始查询")
@@ -424,7 +433,6 @@ class MainWindow(QMainWindow):
         query_group.setLayout(query_layout)
         main_layout.addWidget(query_group)
         
-        # 结果显示区域
         result_widget = QWidget()
         result_layout = QVBoxLayout()
         
@@ -441,7 +449,6 @@ class MainWindow(QMainWindow):
         structured_tab.setLayout(structured_layout)
         result_tabs.addTab(structured_tab, "结构化结果")
         
-        # 原始结果
         raw_tab = QWidget()
         raw_layout = QVBoxLayout()
         
@@ -457,7 +464,6 @@ class MainWindow(QMainWindow):
         
         main_layout.addWidget(result_widget)
         
-        # 工具栏
         toolbar_layout = QHBoxLayout()
         
         self.config_btn = QPushButton("配置管理")
@@ -487,7 +493,6 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("就绪")
         
-        # 添加连接状态显示
         self.connection_status = QLabel("连接状态: 未知")
         self.status_bar.addPermanentWidget(self.connection_status)
         
@@ -499,9 +504,9 @@ class MainWindow(QMainWindow):
         """更新页面大小显示"""
         try:
             page_size = getattr(getattr(config, 'query', object()), 'default_page_size', 20)
-            self.page_size_label.setText(f"页面大小: {page_size}")
-        except:
-            self.page_size_label.setText("页面大小: 20")
+        except (AttributeError, TypeError):
+            page_size = 20
+        self.page_size_label.setText(f"页面大小: {page_size}")
         
     def start_query(self):
         """开始查询"""
@@ -512,28 +517,23 @@ class MainWindow(QMainWindow):
             
         query_type = self.query_type.currentText()
         
-        # 解析查询目标（支持批量查询）
-        query_targets = [line.strip() for line in query_text.split('\n') if line.strip()]
+        query_targets = self._sanitize_query_targets(query_text)
         
         if not query_targets:
             QMessageBox.warning(self, "警告", "请输入有效的查询内容")
             return
         
-        # 如果是单个查询，使用原有逻辑
         if len(query_targets) == 1:
             self._start_single_query(query_type, query_targets[0])
         else:
-            # 批量查询
             self._start_batch_query(query_type, query_targets)
     
     def _start_single_query(self, query_type, query_text):
         """单个查询"""
-        # 禁用查询按钮
         self.query_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)  # 不确定进度
+        self.progress_bar.setRange(0, 0)
         
-        # 启动查询线程
         self.query_worker = QueryWorker(query_type, query_text)
         self.query_worker.result_ready.connect(self.on_query_result)
         self.query_worker.progress_update.connect(self.on_progress_update)
@@ -542,13 +542,11 @@ class MainWindow(QMainWindow):
     
     def _start_batch_query(self, query_type, query_targets):
         """批量查询"""
-        # 禁用查询按钮
         self.query_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, len(query_targets))
         self.progress_bar.setValue(0)
         
-        # 启动批量查询线程
         self.batch_worker = BatchQueryWorker(query_type, query_targets)
         self.batch_worker.result_ready.connect(self.on_batch_query_result)
         self.batch_worker.progress_update.connect(self.on_batch_progress_update)
@@ -560,10 +558,8 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.query_btn.setEnabled(True)
         
-        # 显示原始结果
         self.raw_result.setPlainText(json.dumps(result, ensure_ascii=False, indent=2))
         
-        # 解析并显示结构化结果
         self.display_structured_result(result)
         
         self.status_bar.showMessage("查询完成")
@@ -588,10 +584,8 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.query_btn.setEnabled(True)
         
-        # 显示原始结果
         self.raw_result.setPlainText(json.dumps(result, ensure_ascii=False, indent=2))
         
-        # 解析并显示结构化结果
         self.display_structured_result(result)
         
         self.status_bar.showMessage("批量查询完成")
@@ -620,38 +614,29 @@ class MainWindow(QMainWindow):
             return
         
         if result.get('code') == 404 or result.get('success') == False:
-            # 404或查询失败，不显示任何内容
             return
         
-        # 检查是否有params.list数据
         if 'params' in result and isinstance(result['params'], dict) and 'list' in result['params']:
             data_list = result['params']['list']
             if isinstance(data_list, list) and len(data_list) > 0:
-                # 解析list中的数据
                 self.parse_data_list(data_list)
                 return
             else:
                 return
         
-        # 如果没有list数据，检查是否是成功的结果
         if result.get('success', False) and result.get('code', 0) == 200:
-            # 成功但没有数据，不显示任何内容
             return
         
-        # 其他情况不显示任何内容
         return
     
     def parse_data_list(self, data_list):
         """解析数据列表 - 每行一个数据项，只显示重要信息"""
-        # 检查是否是批量查询结果（包含_query_target字段）
         is_batch_result = any(item.get('_query_target') for item in data_list if isinstance(item, dict))
         
         if is_batch_result:
-            # 批量查询结果，显示查询目标
             self.result_table.setColumnCount(4)
             self.result_table.setHorizontalHeaderLabels(["查询目标", "域名", "单位名称", "备案号"])
         else:
-            # 单个查询结果
             self.result_table.setColumnCount(3)
             self.result_table.setHorizontalHeaderLabels(["域名", "单位名称", "备案号"])
         
@@ -663,23 +648,19 @@ class MainWindow(QMainWindow):
             self.result_table.insertRow(row)
             col = 0
             
-            # 如果是批量查询结果，先显示查询目标
             if is_batch_result:
                 query_target = item.get('_query_target', '')
                 self.result_table.setItem(row, col, QTableWidgetItem(str(query_target)))
                 col += 1
             
-            # 域名
             domain = item.get('domain', '')
             self.result_table.setItem(row, col, QTableWidgetItem(str(domain)))
             col += 1
             
-            # 单位名称
             unit_name = item.get('unitName', '')
             self.result_table.setItem(row, col, QTableWidgetItem(str(unit_name)))
             col += 1
             
-            # 备案号（显示主体备案号）
             main_licence = item.get('mainLicence', '')
             self.result_table.setItem(row, col, QTableWidgetItem(str(main_licence)))
             
@@ -698,10 +679,18 @@ class MainWindow(QMainWindow):
     
     def on_config_saved(self):
         """配置保存后的处理"""
-        # 更新页面大小显示
+        self.reload_config()
         self.update_page_size_display()
-        # 更新状态栏
         self.status_bar.showMessage("配置已重新加载")
+    
+    def reload_config(self):
+        """重新加载配置和查询模块"""
+        global config
+        import importlib
+        import load_config
+        importlib.reload(load_config)
+        config = load_config.config
+        importlib.reload(ymicp)
         
     def export_results(self):
         """导出结果"""
@@ -724,57 +713,44 @@ class MainWindow(QMainWindow):
     
     def _export_to_excel(self, file_path):
         """导出到Excel文件"""
-        from openpyxl import Workbook
-        from openpyxl.styles import Font, Alignment, PatternFill
-        from openpyxl.utils import get_column_letter
-        
-        # 创建工作簿
         wb = Workbook()
         
-        # 删除默认工作表
         wb.remove(wb.active)
         
-        # 创建查询结果工作表
         ws_results = wb.create_sheet("查询结果")
         self._write_results_to_sheet(ws_results)
         
-        # 保存文件
         wb.save(file_path)
     
     def _write_results_to_sheet(self, ws):
         """写入查询结果到工作表"""
-        # 设置表头
         headers = []
+        column_widths = []
         for col in range(self.result_table.columnCount()):
             header_item = self.result_table.horizontalHeaderItem(col)
             if header_item:
                 headers.append(header_item.text())
             else:
                 headers.append(f"列{col+1}")
+            column_widths.append(len(headers[-1]))
         
-        # 写入表头
         for col, header in enumerate(headers, 1):
             cell = ws.cell(row=1, column=col, value=header)
             cell.font = Font(bold=True)
             cell.fill = PatternFill(start_color="CCCCCC", end_color="CCCCCC", fill_type="solid")
             cell.alignment = Alignment(horizontal="center", vertical="center")
         
-        # 写入数据
         for row in range(self.result_table.rowCount()):
             for col in range(self.result_table.columnCount()):
                 item = self.result_table.item(row, col)
                 if item:
-                    ws.cell(row=row+2, column=col+1, value=item.text())
+                    value = item.text()
+                    ws.cell(row=row+2, column=col+1, value=value)
+                    column_widths[col] = max(column_widths[col], len(value))
         
-        # 自动调整列宽
-        for col in range(1, len(headers) + 1):
-            column_letter = get_column_letter(col)
-            max_length = 0
-            for row in range(1, ws.max_row + 1):
-                cell_value = ws[f"{column_letter}{row}"].value
-                if cell_value:
-                    max_length = max(max_length, len(str(cell_value)))
-            ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
+        for idx, width in enumerate(column_widths, start=1):
+            column_letter = get_column_letter(idx)
+            ws.column_dimensions[column_letter].width = min(width + 2, 50)
     
     def clear_results(self):
         """清空结果"""
@@ -786,6 +762,23 @@ class MainWindow(QMainWindow):
         """显示关于对话框"""
         about_dialog = AboutDialog(self)
         about_dialog.exec_()
+
+    def _sanitize_query_targets(self, raw_text):
+        """清洗用户输入的查询目标，去除空行、重复和无意义字符"""
+        cleaned = []
+        seen = set()
+        max_length = 256
+        for line in raw_text.splitlines():
+            candidate = line.strip().strip(",;")
+            if not candidate:
+                continue
+            if len(candidate) > max_length:
+                continue
+            if candidate in seen:
+                continue
+            cleaned.append(candidate)
+            seen.add(candidate)
+        return cleaned
 
 def main():
     """主函数"""

@@ -30,17 +30,6 @@ class ProxyManager:
         self.static_proxy = None
         self._init_static_proxy()
     
-    def reload_config(self):
-        """重新加载配置"""
-        global config
-        import importlib
-        import load_config
-        importlib.reload(load_config)
-        config = load_config.config
-        self.proxy_config = getattr(config, 'proxy', object())
-        self.static_proxy = None
-        self._init_static_proxy()
-    
     def _init_static_proxy(self):
         """初始化静态代理配置"""
         static_config = getattr(self.proxy_config, 'static_proxy', object())
@@ -121,6 +110,7 @@ class beian:
         self.token = ""
         self.token_expire = 0
         self.det = detnate()
+        self._loop = asyncio.new_event_loop()
         # 增加超时时间，特别是对于代理连接
         base_timeout = getattr(getattr(config, 'system', object()), 'http_client_timeout', 30)
         self.timeout = aiohttp.ClientTimeout(
@@ -146,27 +136,15 @@ class beian:
         # 初始化代理管理器
         self.proxy_manager = ProxyManager()
     
-    def reload_config(self):
-        """重新加载配置"""
-        global config
-        import importlib
-        import load_config
-        importlib.reload(load_config)
-        config = load_config.config
-        
-        # 重新初始化代理管理器
-        self.proxy_manager.reload_config()
-        
-        # 重新设置超时时间
-        base_timeout = getattr(getattr(config, 'system', object()), 'http_client_timeout', 30)
-        self.timeout = aiohttp.ClientTimeout(
-            total=base_timeout * 2,  # 总超时时间翻倍
-            connect=base_timeout,    # 连接超时
-            sock_read=base_timeout,  # 读取超时
-            sock_connect=base_timeout  # socket连接超时
-        )
-
-
+    def _ensure_loop(self):
+        if not getattr(self, "_loop", None) or self._loop.is_closed():
+            self._loop = asyncio.new_event_loop()
+    
+    def run_async(self, coro):
+        """在内部事件循环中运行协程，避免频繁创建新循环"""
+        self._ensure_loop()
+        return self._loop.run_until_complete(coro)
+    
     def _add_blocked_ip(self, ip):
         """将IP添加到黑名单缓存"""
         if not ip:
@@ -739,32 +717,11 @@ class beian:
             pageSize = getattr(getattr(config, 'query', object()), 'default_page_size', 20)
         return await self.autoget(name, 3, pageNum, pageSize, b=0)
 
-    async def test_proxy_connection(self):
-        """测试代理连接"""
-        try:
-            proxy = self.proxy_manager.get_proxy()
-            if not proxy:
-                logger.info("未配置代理，测试直连")
-                proxy = None
-            
-            logger.info(f"测试代理连接: {proxy or '直连'}")
-            
-            async with self.get_session(proxy) as session:
-                # 测试一个简单的HTTP请求
-                async with session.get("https://httpbin.org/ip", timeout=aiohttp.ClientTimeout(total=10)) as req:
-                    if req.status == 200:
-                        data = await req.json()
-                        logger.info(f"代理连接测试成功，当前IP: {data.get('origin', 'unknown')}")
-                        return True, data.get('origin', 'unknown')
-                    else:
-                        logger.error(f"代理连接测试失败，状态码: {req.status}")
-                        return False, f"HTTP状态码: {req.status}"
-        except Exception as e:
-            logger.error(f"代理连接测试异常: {e}")
-            return False, str(e)
-
-    async def cleanup(self):
-        """清理资源 - 移除连接器缓存相关代码"""
+    def cleanup(self):
+        """清理资源并关闭事件循环"""
+        if getattr(self, "_loop", None):
+            if not self._loop.is_closed():
+                self._loop.close()
         logger.info("beian资源清理完成")
 
 if __name__ == "__main__":
@@ -778,7 +735,7 @@ if __name__ == "__main__":
             data = await a.ymApp("深圳市腾讯计算机系统有限公司")
             print(f"查询结果：\n{data}")
         finally:
-            await a.cleanup()  # 确保资源清理
+            a.cleanup()  # 确保资源清理
 
     asyncio.run(main())
 
@@ -791,6 +748,6 @@ if __name__ == "__main__":
         try:
             data = await icp.ymApp("微信")
         finally:
-            await icp.cleanup()  # 重要：确保资源清理
+            icp.cleanup()  # 重要：确保资源清理
     
     """
