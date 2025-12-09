@@ -632,13 +632,16 @@ class MainWindow(QMainWindow):
     def parse_data_list(self, data_list):
         """解析数据列表 - 每行一个数据项，只显示重要信息"""
         is_batch_result = any(item.get('_query_target') for item in data_list if isinstance(item, dict))
+        has_domain = any(item.get('domain') for item in data_list if isinstance(item, dict))
+        
+        name_header = "域名" if has_domain else "服务名称"
         
         if is_batch_result:
             self.result_table.setColumnCount(4)
-            self.result_table.setHorizontalHeaderLabels(["查询目标", "域名", "单位名称", "备案号"])
+            self.result_table.setHorizontalHeaderLabels(["查询目标", name_header, "单位名称", "备案号"])
         else:
             self.result_table.setColumnCount(3)
-            self.result_table.setHorizontalHeaderLabels(["域名", "单位名称", "备案号"])
+            self.result_table.setHorizontalHeaderLabels([name_header, "单位名称", "备案号"])
         
         row = 0
         for i, item in enumerate(data_list):
@@ -653,8 +656,8 @@ class MainWindow(QMainWindow):
                 self.result_table.setItem(row, col, QTableWidgetItem(str(query_target)))
                 col += 1
             
-            domain = item.get('domain', '')
-            self.result_table.setItem(row, col, QTableWidgetItem(str(domain)))
+            name_value = item.get('domain') if has_domain else item.get('serviceName', '')
+            self.result_table.setItem(row, col, QTableWidgetItem(str(name_value or "")))
             col += 1
             
             unit_name = item.get('unitName', '')
