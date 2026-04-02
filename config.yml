@@ -1,9 +1,9 @@
 captcha:
-  captcha_retry_times: 5
+  captcha_retry_times: 10
   device:
   - CUDA
   enable: true
-  proxy_retry_delay: 1
+  proxy_retry_delay: 3
   save_failed_img: false
   save_failed_img_path: failed_captcha
 log:
@@ -35,10 +35,12 @@ query:
   captcha_retry_times: 5
   coding_code: auto
   coding_show: false
-  default_page_size: 20
+  default_page_size: 40
   max_page_size: 100
   proxy_retry_delay: 1
   retry_times: 2
+  risk_delay_enable: false
+  risk_delay_seconds: 20
 risk_avoidance:
   allow_type:
   - web
